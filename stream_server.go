@@ -2,82 +2,53 @@ package grpc_interceptor
 
 import (
     "google.golang.org/grpc"
-    "strconv"
 )
 
-type StreamServerHandler func(
-    srv interface{},
-    ss grpc.ServerStream,
-    info *grpc.StreamServerInfo,
-    handler grpc.StreamHandler,
-) error
-
-type streamServerHandlerGroup struct {
-    name string
-    handlers []StreamServerHandler
+type streamServerInterceptorGroup struct {
+    handlers []grpc.StreamServerInterceptor
     skip map[string]struct{}
 }
 
 type StreamServerInterceptors struct {
-    global []*streamServerHandlerGroup
-    special  map[string][]StreamServerHandler
-    count int
+    global []*streamServerInterceptorGroup
+    part  map[string][]grpc.StreamServerInterceptor
 }
 
-func (interceptors *StreamServerInterceptors) AddGlobalHandlerGroup(groupName string, handlers []StreamServerHandler,
-    skip ...string) {
+func (ssi *StreamServerInterceptors) UseGlobal(interceptors []grpc.StreamServerInterceptor, skipMethods ...string) {
+    skip := make(map[string]struct{}, len(skipMethods))
+    for _, method := range skipMethods {
+        skip[method] = struct{}{}
+    }
     
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    for i := range interceptors.global {
-        if interceptors.global[i].name == groupName {
-            interceptors.global[i].handlers = handlers
-            interceptors.global[i].skip = skipm
-            return
-        }
-    }
-    interceptors.global = append(interceptors.global, &streamServerHandlerGroup{
-        name: groupName,
-        handlers: handlers,
-        skip: skipm,
+    ssi.global = append(ssi.global, &streamServerInterceptorGroup{
+        handlers: interceptors,
+        skip: skip,
     })
-    interceptors.count++
 }
 
-func (interceptors *StreamServerInterceptors) AddGlobalHandler(handler StreamServerHandler, skip ...string) {
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    interceptors.global = append(interceptors.global, &streamServerHandlerGroup{
-        name: "group@" + strconv.Itoa(interceptors.count),
-        handlers: []StreamServerHandler{handler},
-        skip: skipm,
-    })
-    interceptors.count++
-}
-
-func (interceptors *StreamServerInterceptors) AddSpecialHandler(srvMethod string, handlers ...StreamServerHandler) {
-    if interceptors.special == nil {
-        interceptors.special = make(map[string][]StreamServerHandler)
-    }
-    if _, ok := interceptors.special[srvMethod]; !ok {
-        interceptors.special[srvMethod] = handlers
+func (ssi *StreamServerInterceptors) UseMethod(method string, interceptors ...grpc.StreamServerInterceptor) {
+    if ssi.part == nil {
+        ssi.part = make(map[string][]grpc.StreamServerInterceptor)
+        ssi.part[method] = interceptors
         return
     }
-    interceptors.special[srvMethod] = append(interceptors.special[srvMethod], handlers...)
+    
+    if _, ok := ssi.part[method]; !ok {
+        ssi.part[method] = interceptors
+        return
+    }
+    
+    ssi.part[method] = append(ssi.part[method], interceptors...)
 }
 
-func (interceptors *StreamServerInterceptors) StreamServerInterceptor() grpc.StreamServerInterceptor {
+func (ssi *StreamServerInterceptors) StreamServerInterceptor() grpc.StreamServerInterceptor {
     return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo,
         handler grpc.StreamHandler) error {
         
-        globalCount := len(interceptors.global)
-        specialCount := len(interceptors.special[info.FullMethod])
+        globalCount := len(ssi.global)
+        methodCount := len(ssi.part[info.FullMethod])
         
-        if globalCount + specialCount == 0 {
+        if globalCount + methodCount == 0 {
             return handler(srv, ss)
         }
         
@@ -88,7 +59,7 @@ func (interceptors *StreamServerInterceptors) StreamServerInterceptor() grpc.Str
         chainHandler = func(srv interface{}, ss grpc.ServerStream) error {
             if groupI < globalCount {
                 for {
-                    group := interceptors.global[groupI]
+                    group := ssi.global[groupI]
                     if _, ok := group.skip[info.FullMethod]; !ok {
                         index := handlerI
                         handlerI++
@@ -104,8 +75,8 @@ func (interceptors *StreamServerInterceptors) StreamServerInterceptor() grpc.Str
                 }
             }
             
-            if handlerI < specialCount {
-                special := interceptors.special[info.FullMethod]
+            if handlerI < methodCount {
+                special := ssi.part[info.FullMethod]
                 index := handlerI
                 handlerI++
                 return special[index](srv, ss, info, chainHandler)

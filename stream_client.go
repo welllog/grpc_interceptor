@@ -3,101 +3,71 @@ package grpc_interceptor
 import (
     "context"
     "google.golang.org/grpc"
-    "strconv"
 )
 
-type StreamClientHandler func(
-    ctx context.Context,
-    desc *grpc.StreamDesc,
-    cc *grpc.ClientConn,
-    srvMethod string,
-    streamer grpc.Streamer,
-) (grpc.ClientStream, error)
-
-type streamClientHandlerGroup struct {
-    name string
-    handlers []StreamClientHandler
+type streamClientInterceptorGroup struct {
+    handlers []grpc.StreamClientInterceptor
     skip map[string]struct{}
 }
 
 type StreamClientInterceptors struct {
-    global []*streamClientHandlerGroup
-    special  map[string][]StreamClientHandler
-    count int
+    global []*streamClientInterceptorGroup
+    part  map[string][]grpc.StreamClientInterceptor
 }
 
-func (interceptors *StreamClientInterceptors) AddGlobalHandlerGroup(groupName string, handlers []StreamClientHandler,
-    skip ...string) {
+func (sci *StreamClientInterceptors) UseGlobal(interceptors []grpc.StreamClientInterceptor, skipMethods ...string) {
+    skip := make(map[string]struct{}, len(skipMethods))
+    for _, method := range skipMethods {
+        skip[method] = struct{}{}
+    }
     
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    for i := range interceptors.global {
-        if interceptors.global[i].name == groupName {
-            interceptors.global[i].handlers = handlers
-            interceptors.global[i].skip = skipm
-            return
-        }
-    }
-    interceptors.global = append(interceptors.global, &streamClientHandlerGroup{
-        name: groupName,
-        handlers: handlers,
-        skip: skipm,
+    sci.global = append(sci.global, &streamClientInterceptorGroup{
+        handlers: interceptors,
+        skip:     skip,
     })
-    interceptors.count++
 }
 
-func (interceptors *StreamClientInterceptors) AddGlobalHandler(handler StreamClientHandler, skip ...string) {
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    interceptors.global = append(interceptors.global, &streamClientHandlerGroup{
-        name: "group@" + strconv.Itoa(interceptors.count),
-        handlers: []StreamClientHandler{handler},
-        skip: skipm,
-    })
-    interceptors.count++
-}
-
-func (interceptors *StreamClientInterceptors) AddSpecialHandler(srvMethod string, handlers ...StreamClientHandler) {
-    if interceptors.special == nil {
-        interceptors.special = make(map[string][]StreamClientHandler)
-    }
-    if _, ok := interceptors.special[srvMethod]; !ok {
-        interceptors.special[srvMethod] = handlers
+func (sci *StreamClientInterceptors) UseMethod(method string, interceptors ...grpc.StreamClientInterceptor) {
+    if sci.part == nil {
+        sci.part = make(map[string][]grpc.StreamClientInterceptor)
+        sci.part[method] = interceptors
         return
     }
-    interceptors.special[srvMethod] = append(interceptors.special[srvMethod], handlers...)
+    
+    if _, ok := sci.part[method]; !ok {
+        sci.part[method] = interceptors
+        return
+    }
+    
+    sci.part[method] = append(sci.part[method], interceptors...)
 }
 
-func (interceptors *StreamClientInterceptors) StreamClientInterceptor() grpc.StreamClientInterceptor {
-    return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, srvMethod string,
+func (sci *StreamClientInterceptors) StreamClientInterceptor() grpc.StreamClientInterceptor {
+    return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
         streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
         
-        globalCount := len(interceptors.global)
-        specialCount := len(interceptors.special[srvMethod])
+        globalCount := len(sci.global)
+        methodCount := len(sci.part[method])
         
-        if globalCount + specialCount == 0 {
-            return streamer(ctx, desc, cc, srvMethod, opts...)
+        if globalCount + methodCount == 0 {
+            return streamer(ctx, desc, cc, method, opts...)
         }
         
         var (
             groupI, handlerI int
             chainHandler grpc.Streamer
         )
-        chainHandler = func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, srvMethod string,
+        chainHandler = func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
             opts ...grpc.CallOption) (grpc.ClientStream, error) {
             
             if groupI < globalCount {
                 for {
-                    group := interceptors.global[groupI]
-                    if _, ok := group.skip[srvMethod]; !ok {
+                    group := sci.global[groupI]
+                    if _, ok := group.skip[method]; !ok {
                         index := handlerI
                         handlerI++
                         if index < len(group.handlers) {
-                            return group.handlers[index](ctx, desc, cc, srvMethod, chainHandler)
+                            return group.handlers[index](ctx, desc, cc, method, chainHandler, opts...)
                         }
                         handlerI = 0
                     }
@@ -108,16 +78,16 @@ func (interceptors *StreamClientInterceptors) StreamClientInterceptor() grpc.Str
                 }
             }
             
-            if handlerI < specialCount {
-                special := interceptors.special[srvMethod]
+            if handlerI < methodCount {
+                special := sci.part[method]
                 index := handlerI
                 handlerI++
-                return special[index](ctx, desc, cc, srvMethod, chainHandler)
+                return special[index](ctx, desc, cc, method, chainHandler, opts...)
             }
             
-            return streamer(ctx, desc, cc, srvMethod, opts...)
+            return streamer(ctx, desc, cc, method, opts...)
         }
         
-        return chainHandler(ctx, desc, cc, srvMethod, opts...)
+        return chainHandler(ctx, desc, cc, method, opts...)
     }
 }

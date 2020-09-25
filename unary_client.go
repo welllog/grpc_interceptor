@@ -3,101 +3,71 @@ package grpc_interceptor
 import (
     "context"
     "google.golang.org/grpc"
-    "strconv"
 )
 
-type UnaryClientHandler func(
-    ctx context.Context,
-    srvMethod string,
-    req, reply interface{},
-    cc *grpc.ClientConn,
-    invoker grpc.UnaryInvoker,
-) error
-
-type unaryClientHandlerGroup struct {
-    name string
-    handlers []UnaryClientHandler
+type unaryClientInterceptorGroup struct {
+    handlers []grpc.UnaryClientInterceptor
     skip map[string]struct{}
 }
 
 type UnaryClientInterceptors struct {
-    global []*unaryClientHandlerGroup
-    special  map[string][]UnaryClientHandler
-    count int
+    global []*unaryClientInterceptorGroup
+    part  map[string][]grpc.UnaryClientInterceptor
 }
 
-func (interceptors *UnaryClientInterceptors) AddGlobalHandlerGroup(groupName string, handlers []UnaryClientHandler,
-    skip ...string) {
+func (uci *UnaryClientInterceptors) UseGlobal(interceptors []grpc.UnaryClientInterceptor, skipMethods ...string) {
+    skip := make(map[string]struct{}, len(skipMethods))
+    for _, method := range skipMethods {
+        skip[method] = struct{}{}
+    }
     
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    for i := range interceptors.global {
-        if interceptors.global[i].name == groupName {
-            interceptors.global[i].handlers = handlers
-            interceptors.global[i].skip = skipm
-            return
-        }
-    }
-    interceptors.global = append(interceptors.global, &unaryClientHandlerGroup{
-        name: groupName,
-        handlers: handlers,
-        skip: skipm,
+    uci.global = append(uci.global, &unaryClientInterceptorGroup{
+        handlers: interceptors,
+        skip:     skip,
     })
-    interceptors.count++
 }
 
-func (interceptors *UnaryClientInterceptors) AddGlobalHandler(handler UnaryClientHandler, skip ...string) {
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    interceptors.global = append(interceptors.global, &unaryClientHandlerGroup{
-        name: "group@" + strconv.Itoa(interceptors.count),
-        handlers: []UnaryClientHandler{handler},
-        skip: skipm,
-    })
-    interceptors.count++
-}
-
-func (interceptors *UnaryClientInterceptors) AddSpecialHandler(srvMethod string, handlers ...UnaryClientHandler) {
-    if interceptors.special == nil {
-        interceptors.special = make(map[string][]UnaryClientHandler)
-    }
-    if _, ok := interceptors.special[srvMethod]; !ok {
-        interceptors.special[srvMethod] = handlers
+func (uci *UnaryClientInterceptors) UseMethod(method string, interceptors ...grpc.UnaryClientInterceptor) {
+    if uci.part == nil {
+        uci.part = make(map[string][]grpc.UnaryClientInterceptor)
+        uci.part[method] = interceptors
         return
     }
-    interceptors.special[srvMethod] = append(interceptors.special[srvMethod], handlers...)
+    
+    if _, ok := uci.part[method]; !ok {
+        uci.part[method] = interceptors
+        return
+    }
+    
+    uci.part[method] = append(uci.part[method], interceptors...)
 }
 
-func (interceptors *UnaryClientInterceptors) UnaryClientInterceptor() grpc.UnaryClientInterceptor {
-    return func(ctx context.Context, srvMethod string, req, reply interface{},
+func (uci *UnaryClientInterceptors) UnaryClientInterceptor() grpc.UnaryClientInterceptor {
+    return func(ctx context.Context, method string, req, reply interface{},
         cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
         
-        globalCount := len(interceptors.global)
-        specialCount := len(interceptors.special[srvMethod])
+        globalCount := len(uci.global)
+        methodCount := len(uci.part[method])
         
-        if globalCount + specialCount == 0 {
-            return invoker(ctx, srvMethod, req, reply, cc, opts...)
+        if globalCount + methodCount == 0 {
+            return invoker(ctx, method, req, reply, cc, opts...)
         }
         
         var (
             groupI, handlerI int
             chainHandler grpc.UnaryInvoker
         )
-        chainHandler = func(ctx context.Context, srvMethod string, req, reply interface{},
+        chainHandler = func(ctx context.Context, method string, req, reply interface{},
             cc *grpc.ClientConn, opts ...grpc.CallOption) error {
             
             if groupI < globalCount {
                 for {
-                    group := interceptors.global[groupI]
-                    if _, ok := group.skip[srvMethod]; !ok {
+                    group := uci.global[groupI]
+                    if _, ok := group.skip[method]; !ok {
                         index := handlerI
                         handlerI++
                         if index < len(group.handlers) {
-                            return group.handlers[index](ctx, srvMethod, req, reply, cc, chainHandler)
+                            return group.handlers[index](ctx, method, req, reply, cc, chainHandler, opts...)
                         }
                         handlerI = 0
                     }
@@ -108,16 +78,16 @@ func (interceptors *UnaryClientInterceptors) UnaryClientInterceptor() grpc.Unary
                 }
             }
             
-            if handlerI < specialCount {
-                special := interceptors.special[srvMethod]
+            if handlerI < methodCount {
+                special := uci.part[method]
                 index := handlerI
                 handlerI++
-                return special[index](ctx, srvMethod, req, reply, cc, chainHandler)
+                return special[index](ctx, method, req, reply, cc, chainHandler, opts...)
             }
             
-            return invoker(ctx, srvMethod, req, reply, cc, opts...)
+            return invoker(ctx, method, req, reply, cc, opts...)
         }
         
-        return chainHandler(ctx, srvMethod, req, reply, cc, opts...)
+        return chainHandler(ctx, method, req, reply, cc, opts...)
     }
 }

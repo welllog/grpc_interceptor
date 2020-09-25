@@ -3,82 +3,53 @@ package grpc_interceptor
 import (
     "context"
     "google.golang.org/grpc"
-    "strconv"
 )
 
-type UnaryServerHandler func(
-    ctx context.Context,
-    req interface{},
-    info *grpc.UnaryServerInfo,
-    handler grpc.UnaryHandler,
-) (interface{}, error)
-
-type unaryServerHandlerGroup struct {
-    name string
-    handlers []UnaryServerHandler
+type unaryServerInterceptorGroup struct {
+    handlers []grpc.UnaryServerInterceptor
     skip map[string]struct{}
 }
 
 type UnaryServerInterceptors struct {
-    global []*unaryServerHandlerGroup
-    special  map[string][]UnaryServerHandler
-    count int
+    global []*unaryServerInterceptorGroup
+    part  map[string][]grpc.UnaryServerInterceptor
 }
 
-func (interceptors *UnaryServerInterceptors) AddGlobalHandlerGroup(groupName string, handlers []UnaryServerHandler,
-    skip ...string) {
+func (usi *UnaryServerInterceptors) UseGlobal(interceptors []grpc.UnaryServerInterceptor, skipMethods ...string) {
+    skip := make(map[string]struct{}, len(skipMethods))
+    for _, method := range skipMethods {
+        skip[method] = struct{}{}
+    }
     
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    for i := range interceptors.global {
-        if interceptors.global[i].name == groupName {
-            interceptors.global[i].handlers = handlers
-            interceptors.global[i].skip = skipm
-            return
-        }
-    }
-    interceptors.global = append(interceptors.global, &unaryServerHandlerGroup{
-        name: groupName,
-        handlers: handlers,
-        skip: skipm,
+    usi.global = append(usi.global, &unaryServerInterceptorGroup{
+        handlers: interceptors,
+        skip:     skip,
     })
-    interceptors.count++
 }
 
-func (interceptors *UnaryServerInterceptors) AddGlobalHandler(handler UnaryServerHandler, skip ...string) {
-    skipm := make(map[string]struct{}, len(skip))
-    for _, s := range skip {
-        skipm[s] = struct{}{}
-    }
-    interceptors.global = append(interceptors.global, &unaryServerHandlerGroup{
-        name: "group@" + strconv.Itoa(interceptors.count),
-        handlers: []UnaryServerHandler{handler},
-        skip: skipm,
-    })
-    interceptors.count++
-}
-
-func (interceptors *UnaryServerInterceptors) AddSpecialHandler(srvMethod string, handlers ...UnaryServerHandler) {
-    if interceptors.special == nil {
-        interceptors.special = make(map[string][]UnaryServerHandler)
-    }
-    if _, ok := interceptors.special[srvMethod]; !ok {
-        interceptors.special[srvMethod] = handlers
+func (usi *UnaryServerInterceptors) UseMethod(method string, interceptors ...grpc.UnaryServerInterceptor) {
+    if usi.part == nil {
+        usi.part = make(map[string][]grpc.UnaryServerInterceptor)
+        usi.part[method] = interceptors
         return
     }
-    interceptors.special[srvMethod] = append(interceptors.special[srvMethod], handlers...)
+    
+    if _, ok := usi.part[method]; !ok {
+        usi.part[method] = interceptors
+        return
+    }
+    
+    usi.part[method] = append(usi.part[method], interceptors...)
 }
 
-func (interceptors *UnaryServerInterceptors) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
+func (usi *UnaryServerInterceptors) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
     return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo,
     handler grpc.UnaryHandler)(interface{}, error) {
         
-        globalCount := len(interceptors.global)
-        specialCount := len(interceptors.special[info.FullMethod])
-        
-        if globalCount + specialCount == 0 {
+        globalCount := len(usi.global)
+        methodCount := len(usi.part[info.FullMethod])
+    
+        if globalCount + methodCount == 0 {
             return handler(ctx, req)
         }
         
@@ -89,7 +60,7 @@ func (interceptors *UnaryServerInterceptors) UnaryServerInterceptor() grpc.Unary
         chainHandler = func(ctx context.Context, req interface{}) (interface{}, error) {
             if groupI < globalCount {
                 for {
-                    group := interceptors.global[groupI]
+                    group := usi.global[groupI]
                     if _, ok := group.skip[info.FullMethod]; !ok {
                         index := handlerI
                         handlerI++
@@ -105,8 +76,8 @@ func (interceptors *UnaryServerInterceptors) UnaryServerInterceptor() grpc.Unary
                 }
             }
             
-            if handlerI < specialCount {
-                special := interceptors.special[info.FullMethod]
+            if handlerI < methodCount {
+                special := usi.part[info.FullMethod]
                 index := handlerI
                 handlerI++
                 return special[index](ctx, req, info, chainHandler)
