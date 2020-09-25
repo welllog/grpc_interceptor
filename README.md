@@ -32,18 +32,18 @@ handler grpc.StreamHandler) error {
 // Load interceptor ServerDemo1, ignore on /package.Service/Do1 method
 // Same set of interceptors using a common white list
 unaryMd := &grpc_interceptor.UnaryServerInterceptors{}
-unaryMd.AddGlobalHandlerGroup("interceptorGroupName1", []grpc_interceptor.UnaryServerHandler{
+unaryMd.UseGlobal([]grpc.UnaryServerInterceptor{
     ServerDemo1,
     ...
 }, "/package.Service/Do1")
 
 // Load interceptor ServerDemo2, ignore on /package.Service/Do2 method
 streamMd := &grpc_interceptor.StreamServerInterceptors{}
-streamMd.AddGlobalHandler(ServerDemo2, "/package.Service/Do2")
+streamMd.UseGlobal([]grpc.StreamServerInterceptor{ServerDemo2}, "/package.Service/Do2")
 
 
 s := grpc.NewServer(
-        grpc.StreamInterceptor(unaryMd.StreamServerInterceptor()),
+        grpc.StreamInterceptor(streamMd.StreamServerInterceptor()),
         grpc.UnaryInterceptor(unaryMd.UnaryServerInterceptor()),
 )
 ```
@@ -51,19 +51,19 @@ s := grpc.NewServer(
 ##### client
 ```go
 func clientDemo1(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn,
-invoker grpc.UnaryInvoker) error {
+invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 
 	log.Printf("before invoker. method: %+v, request:%+v", method, req)
-	err := invoker(ctx, method, req, reply, cc)
+	err := invoker(ctx, method, req, reply, cc, opts...)
 	log.Printf("after invoker. reply: %+v", reply)
 	return err
 }
 
 func clientDemo2(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, 
-streamer grpc.Streamer) (grpc.ClientStream, error) {
+streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 
 	log.Printf("before invoker. method: %+v, StreamDesc:%+v", method, desc)
-	clientStream, err := streamer(ctx, desc, cc, method)
+	clientStream, err := streamer(ctx, desc, cc, method, opts...)
 	log.Printf("before invoker. method: %+v", method)
 	return clientStream, err
 }
@@ -72,14 +72,14 @@ streamer grpc.Streamer) (grpc.ClientStream, error) {
 
 
 unaryMd := &grpc_interceptor.UnaryClientInterceptors{}
-unaryMd.AddGlobalHandlerGroup("interceptorGroupName1", []grpc_interceptor.UnaryClientHandler{
+unaryMd.UseGlobal([]grpc.UnaryClientInterceptor{
     clientDemo1,
     ...
 })
 
 // Load the interceptor clientDemo2 for /package.Service/Do2 methods only
 streamMd := &grpc_interceptor.StreamClientInterceptors{}
-streamMd.AddSpecialHandler("/package.Service/Do2", clientDemo2)
+streamMd.UseMethod("/package.Service/Do2", clientDemo2)
 
 grpc.Dial(*address, grpc.WithInsecure(), 
     grpc.WithUnaryInterceptor(unaryMd.UnaryClientInterceptor()),
