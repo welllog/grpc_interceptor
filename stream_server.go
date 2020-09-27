@@ -11,6 +11,7 @@ type streamServerInterceptorGroup struct {
 
 type StreamServerInterceptors struct {
     global []*streamServerInterceptorGroup
+    ggCount int
     part  map[string][]grpc.StreamServerInterceptor
 }
 
@@ -24,6 +25,7 @@ func (ssi *StreamServerInterceptors) UseGlobal(interceptors []grpc.StreamServerI
         handlers: interceptors,
         skip: skip,
     })
+    ssi.ggCount++
 }
 
 func (ssi *StreamServerInterceptors) UseMethod(method string, interceptors ...grpc.StreamServerInterceptor) {
@@ -45,40 +47,37 @@ func (ssi *StreamServerInterceptors) StreamServerInterceptor() grpc.StreamServer
     return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo,
         handler grpc.StreamHandler) error {
         
-        globalCount := len(ssi.global)
-        methodCount := len(ssi.part[info.FullMethod])
+        mCount := len(ssi.part[info.FullMethod])
         
-        if globalCount + methodCount == 0 {
+        if ssi.ggCount + mCount == 0 {
             return handler(srv, ss)
         }
         
-        var (
-            groupI, handlerI int
-            chainHandler grpc.StreamHandler
-        )
+        curI := handlerCurI{mCount: mCount}
+        var chainHandler grpc.StreamHandler
         chainHandler = func(srv interface{}, ss grpc.ServerStream) error {
-            if groupI < globalCount {
+            if curI.groupI < ssi.ggCount {
                 for {
-                    group := ssi.global[groupI]
+                    group := ssi.global[curI.groupI]
                     if _, ok := group.skip[info.FullMethod]; !ok {
-                        index := handlerI
-                        handlerI++
+                        index := curI.handlerI
+                        curI.handlerI++
                         if index < len(group.handlers) {
                             return group.handlers[index](srv, ss, info, chainHandler)
                         }
-                        handlerI = 0
+                        curI.handlerI = 0
                     }
-                    groupI++
-                    if groupI >= globalCount {
+                    curI.groupI++
+                    if curI.groupI >= ssi.ggCount {
                         break
                     }
                 }
             }
             
-            if handlerI < methodCount {
+            if curI.handlerI < curI.mCount {
                 special := ssi.part[info.FullMethod]
-                index := handlerI
-                handlerI++
+                index := curI.handlerI
+                curI.handlerI++
                 return special[index](srv, ss, info, chainHandler)
             }
             

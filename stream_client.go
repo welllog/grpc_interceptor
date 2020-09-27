@@ -12,6 +12,7 @@ type streamClientInterceptorGroup struct {
 
 type StreamClientInterceptors struct {
     global []*streamClientInterceptorGroup
+    ggCount int
     part  map[string][]grpc.StreamClientInterceptor
 }
 
@@ -25,6 +26,7 @@ func (sci *StreamClientInterceptors) UseGlobal(interceptors []grpc.StreamClientI
         handlers: interceptors,
         skip:     skip,
     })
+    sci.ggCount++
 }
 
 func (sci *StreamClientInterceptors) UseMethod(method string, interceptors ...grpc.StreamClientInterceptor) {
@@ -46,42 +48,40 @@ func (sci *StreamClientInterceptors) StreamClientInterceptor() grpc.StreamClient
     return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
         streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
         
-        globalCount := len(sci.global)
-        methodCount := len(sci.part[method])
+        mCount := len(sci.part[method])
         
-        if globalCount + methodCount == 0 {
+        if sci.ggCount + mCount == 0 {
             return streamer(ctx, desc, cc, method, opts...)
         }
         
-        var (
-            groupI, handlerI int
-            chainHandler grpc.Streamer
-        )
+        curI := handlerCurI{mCount: mCount}
+        var chainHandler grpc.Streamer
+        
         chainHandler = func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
             opts ...grpc.CallOption) (grpc.ClientStream, error) {
             
-            if groupI < globalCount {
+            if curI.groupI < sci.ggCount {
                 for {
-                    group := sci.global[groupI]
+                    group := sci.global[curI.groupI]
                     if _, ok := group.skip[method]; !ok {
-                        index := handlerI
-                        handlerI++
+                        index := curI.handlerI
+                        curI.handlerI++
                         if index < len(group.handlers) {
                             return group.handlers[index](ctx, desc, cc, method, chainHandler, opts...)
                         }
-                        handlerI = 0
+                        curI.handlerI = 0
                     }
-                    groupI++
-                    if groupI >= globalCount {
+                    curI.groupI++
+                    if curI.groupI >= sci.ggCount {
                         break
                     }
                 }
             }
             
-            if handlerI < methodCount {
+            if curI.handlerI < curI.mCount {
                 special := sci.part[method]
-                index := handlerI
-                handlerI++
+                index := curI.handlerI
+                curI.handlerI++
                 return special[index](ctx, desc, cc, method, chainHandler, opts...)
             }
             

@@ -12,6 +12,7 @@ type unaryClientInterceptorGroup struct {
 
 type UnaryClientInterceptors struct {
     global []*unaryClientInterceptorGroup
+    ggCount int
     part  map[string][]grpc.UnaryClientInterceptor
 }
 
@@ -25,6 +26,7 @@ func (uci *UnaryClientInterceptors) UseGlobal(interceptors []grpc.UnaryClientInt
         handlers: interceptors,
         skip:     skip,
     })
+    uci.ggCount++
 }
 
 func (uci *UnaryClientInterceptors) UseMethod(method string, interceptors ...grpc.UnaryClientInterceptor) {
@@ -46,42 +48,40 @@ func (uci *UnaryClientInterceptors) UnaryClientInterceptor() grpc.UnaryClientInt
     return func(ctx context.Context, method string, req, reply interface{},
         cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
         
-        globalCount := len(uci.global)
-        methodCount := len(uci.part[method])
+        mCount := len(uci.part[method])
         
-        if globalCount + methodCount == 0 {
+        if uci.ggCount + mCount == 0 {
             return invoker(ctx, method, req, reply, cc, opts...)
         }
         
-        var (
-            groupI, handlerI int
-            chainHandler grpc.UnaryInvoker
-        )
+        curI := handlerCurI{mCount: mCount}
+        var chainHandler grpc.UnaryInvoker
+        
         chainHandler = func(ctx context.Context, method string, req, reply interface{},
             cc *grpc.ClientConn, opts ...grpc.CallOption) error {
             
-            if groupI < globalCount {
+            if curI.groupI < uci.ggCount {
                 for {
-                    group := uci.global[groupI]
+                    group := uci.global[curI.groupI]
                     if _, ok := group.skip[method]; !ok {
-                        index := handlerI
-                        handlerI++
+                        index := curI.handlerI
+                        curI.handlerI++
                         if index < len(group.handlers) {
                             return group.handlers[index](ctx, method, req, reply, cc, chainHandler, opts...)
                         }
-                        handlerI = 0
+                        curI.handlerI = 0
                     }
-                    groupI++
-                    if groupI >= globalCount {
+                    curI.groupI++
+                    if curI.groupI >= uci.ggCount {
                         break
                     }
                 }
             }
             
-            if handlerI < methodCount {
+            if curI.handlerI < curI.mCount {
                 special := uci.part[method]
-                index := handlerI
-                handlerI++
+                index := curI.handlerI
+                curI.handlerI++
                 return special[index](ctx, method, req, reply, cc, chainHandler, opts...)
             }
             

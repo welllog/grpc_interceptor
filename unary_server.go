@@ -5,6 +5,12 @@ import (
     "google.golang.org/grpc"
 )
 
+type handlerCurI struct {
+    groupI int
+    handlerI int
+    mCount int
+}
+
 type unaryServerInterceptorGroup struct {
     handlers []grpc.UnaryServerInterceptor
     skip map[string]struct{}
@@ -12,6 +18,7 @@ type unaryServerInterceptorGroup struct {
 
 type UnaryServerInterceptors struct {
     global []*unaryServerInterceptorGroup
+    ggCount int
     part  map[string][]grpc.UnaryServerInterceptor
 }
 
@@ -25,6 +32,7 @@ func (usi *UnaryServerInterceptors) UseGlobal(interceptors []grpc.UnaryServerInt
         handlers: interceptors,
         skip:     skip,
     })
+    usi.ggCount++
 }
 
 func (usi *UnaryServerInterceptors) UseMethod(method string, interceptors ...grpc.UnaryServerInterceptor) {
@@ -46,40 +54,38 @@ func (usi *UnaryServerInterceptors) UnaryServerInterceptor() grpc.UnaryServerInt
     return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo,
     handler grpc.UnaryHandler)(interface{}, error) {
         
-        globalCount := len(usi.global)
-        methodCount := len(usi.part[info.FullMethod])
+        mCount := len(usi.part[info.FullMethod])
     
-        if globalCount + methodCount == 0 {
+        if usi.ggCount + mCount == 0 {
             return handler(ctx, req)
         }
         
-        var (
-            groupI, handlerI int
-            chainHandler grpc.UnaryHandler
-        )
+        curI := handlerCurI{mCount: mCount}
+        var chainHandler grpc.UnaryHandler
+        
         chainHandler = func(ctx context.Context, req interface{}) (interface{}, error) {
-            if groupI < globalCount {
+            if curI.groupI < usi.ggCount {
                 for {
-                    group := usi.global[groupI]
+                    group := usi.global[curI.groupI]
                     if _, ok := group.skip[info.FullMethod]; !ok {
-                        index := handlerI
-                        handlerI++
+                        index := curI.handlerI
+                        curI.handlerI++
                         if index < len(group.handlers) {
                             return group.handlers[index](ctx, req, info, chainHandler)
                         }
-                        handlerI = 0
+                        curI.handlerI = 0
                     }
-                    groupI++
-                    if groupI >= globalCount {
+                    curI.groupI++
+                    if curI.groupI >= usi.ggCount {
                         break
                     }
                 }
             }
             
-            if handlerI < methodCount {
+            if curI.handlerI < curI.mCount {
                 special := usi.part[info.FullMethod]
-                index := handlerI
-                handlerI++
+                index := curI.handlerI
+                curI.handlerI++
                 return special[index](ctx, req, info, chainHandler)
             }
             
