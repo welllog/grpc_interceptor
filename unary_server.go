@@ -6,88 +6,63 @@ import (
 	"google.golang.org/grpc"
 )
 
-type handlerCurI struct {
-	groupI   int
-	handlerI int
-	mCount   int
-}
-
 type unaryServerInterceptorGroup struct {
-	handlers []grpc.UnaryServerInterceptor
-	skip     map[string]struct{}
+	ics    []grpc.UnaryServerInterceptor
+	domain domain
 }
 
 type UnaryServerInterceptors struct {
-	global  []*unaryServerInterceptorGroup
-	ggCount int
-	part    map[string][]grpc.UnaryServerInterceptor
+	s []unaryServerInterceptorGroup
 }
 
-func (usi *UnaryServerInterceptors) UseGlobal(interceptors []grpc.UnaryServerInterceptor, skipMethods ...string) {
-	skip := make(map[string]struct{}, len(skipMethods))
-	for _, method := range skipMethods {
-		skip[method] = struct{}{}
-	}
-
-	usi.global = append(usi.global, &unaryServerInterceptorGroup{
-		handlers: interceptors,
-		skip:     skip,
+func (usi *UnaryServerInterceptors) Add(interceptors ...grpc.UnaryServerInterceptor) *UnaryServerInterceptors {
+	usi.s = append(usi.s, unaryServerInterceptorGroup{
+		ics:    interceptors,
+		domain: newDomain(),
 	})
-	usi.ggCount++
+	return usi
 }
 
-func (usi *UnaryServerInterceptors) UseMethod(method string, interceptors ...grpc.UnaryServerInterceptor) {
-	if usi.part == nil {
-		usi.part = make(map[string][]grpc.UnaryServerInterceptor)
-		usi.part[method] = interceptors
-		return
-	}
+func (usi *UnaryServerInterceptors) AddWithoutMethods(methods []string, interceptors ...grpc.UnaryServerInterceptor) *UnaryServerInterceptors {
+	usi.s = append(usi.s, unaryServerInterceptorGroup{
+		ics:    interceptors,
+		domain: newBlackDomain(methods),
+	})
+	return usi
+}
 
-	if _, ok := usi.part[method]; !ok {
-		usi.part[method] = interceptors
-		return
+func (usi *UnaryServerInterceptors) AddOnMethods(methods []string, interceptors ...grpc.UnaryServerInterceptor) *UnaryServerInterceptors {
+	if len(methods) > 0 {
+		usi.s = append(usi.s, unaryServerInterceptorGroup{
+			ics:    interceptors,
+			domain: newWhiteDomain(methods),
+		})
 	}
-
-	usi.part[method] = append(usi.part[method], interceptors...)
+	return usi
 }
 
 func (usi *UnaryServerInterceptors) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler) (interface{}, error) {
 
-		mCount := len(usi.part[info.FullMethod])
-
-		if usi.ggCount+mCount == 0 {
+		if len(usi.s) == 0 {
 			return handler(ctx, req)
 		}
 
-		curI := handlerCurI{mCount: mCount}
+		var cursor handleCursor
 		var chainHandler grpc.UnaryHandler
 
 		chainHandler = func(ctx context.Context, req interface{}) (interface{}, error) {
-			if curI.groupI < usi.ggCount {
-				for {
-					group := usi.global[curI.groupI]
-					if _, ok := group.skip[info.FullMethod]; !ok {
-						index := curI.handlerI
-						curI.handlerI++
-						if index < len(group.handlers) {
-							return group.handlers[index](ctx, req, info, chainHandler)
-						}
-						curI.handlerI = 0
-					}
-					curI.groupI++
-					if curI.groupI >= usi.ggCount {
-						break
-					}
+			for cursor.segment < len(usi.s) {
+				group := usi.s[cursor.segment]
+				if group.domain.isOnMethod(info.FullMethod) && cursor.offset < len(group.ics) {
+					ic := group.ics[cursor.offset]
+					cursor.offset++
+					return ic(ctx, req, info, chainHandler)
 				}
-			}
 
-			if curI.handlerI < curI.mCount {
-				special := usi.part[info.FullMethod]
-				index := curI.handlerI
-				curI.handlerI++
-				return special[index](ctx, req, info, chainHandler)
+				cursor.offset = 0
+				cursor.segment++
 			}
 
 			return handler(ctx, req)

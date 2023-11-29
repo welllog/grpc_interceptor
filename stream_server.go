@@ -5,80 +5,62 @@ import (
 )
 
 type streamServerInterceptorGroup struct {
-	handlers []grpc.StreamServerInterceptor
-	skip     map[string]struct{}
+	ics    []grpc.StreamServerInterceptor
+	domain domain
 }
 
 type StreamServerInterceptors struct {
-	global  []*streamServerInterceptorGroup
-	ggCount int
-	part    map[string][]grpc.StreamServerInterceptor
+	s []streamServerInterceptorGroup
 }
 
-func (ssi *StreamServerInterceptors) UseGlobal(interceptors []grpc.StreamServerInterceptor, skipMethods ...string) {
-	skip := make(map[string]struct{}, len(skipMethods))
-	for _, method := range skipMethods {
-		skip[method] = struct{}{}
-	}
-
-	ssi.global = append(ssi.global, &streamServerInterceptorGroup{
-		handlers: interceptors,
-		skip:     skip,
+func (ssi *StreamServerInterceptors) Add(interceptors ...grpc.StreamServerInterceptor) *StreamServerInterceptors {
+	ssi.s = append(ssi.s, streamServerInterceptorGroup{
+		ics:    interceptors,
+		domain: newDomain(),
 	})
-	ssi.ggCount++
+	return ssi
 }
 
-func (ssi *StreamServerInterceptors) UseMethod(method string, interceptors ...grpc.StreamServerInterceptor) {
-	if ssi.part == nil {
-		ssi.part = make(map[string][]grpc.StreamServerInterceptor)
-		ssi.part[method] = interceptors
-		return
-	}
+func (ssi *StreamServerInterceptors) AddWithoutMethods(methods []string, interceptors ...grpc.StreamServerInterceptor) *StreamServerInterceptors {
+	ssi.s = append(ssi.s, streamServerInterceptorGroup{
+		ics:    interceptors,
+		domain: newBlackDomain(methods),
+	})
+	return ssi
+}
 
-	if _, ok := ssi.part[method]; !ok {
-		ssi.part[method] = interceptors
-		return
+func (ssi *StreamServerInterceptors) AddOnMethods(methods []string, interceptors ...grpc.StreamServerInterceptor) *StreamServerInterceptors {
+	if len(methods) > 0 {
+		ssi.s = append(ssi.s, streamServerInterceptorGroup{
+			ics:    interceptors,
+			domain: newWhiteDomain(methods),
+		})
 	}
-
-	ssi.part[method] = append(ssi.part[method], interceptors...)
+	return ssi
 }
 
 func (ssi *StreamServerInterceptors) StreamServerInterceptor() grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler) error {
 
-		mCount := len(ssi.part[info.FullMethod])
-
-		if ssi.ggCount+mCount == 0 {
+		if len(ssi.s) == 0 {
 			return handler(srv, ss)
 		}
 
-		curI := handlerCurI{mCount: mCount}
+		var cursor handleCursor
 		var chainHandler grpc.StreamHandler
-		chainHandler = func(srv interface{}, ss grpc.ServerStream) error {
-			if curI.groupI < ssi.ggCount {
-				for {
-					group := ssi.global[curI.groupI]
-					if _, ok := group.skip[info.FullMethod]; !ok {
-						index := curI.handlerI
-						curI.handlerI++
-						if index < len(group.handlers) {
-							return group.handlers[index](srv, ss, info, chainHandler)
-						}
-						curI.handlerI = 0
-					}
-					curI.groupI++
-					if curI.groupI >= ssi.ggCount {
-						break
-					}
-				}
-			}
 
-			if curI.handlerI < curI.mCount {
-				special := ssi.part[info.FullMethod]
-				index := curI.handlerI
-				curI.handlerI++
-				return special[index](srv, ss, info, chainHandler)
+		chainHandler = func(srv interface{}, ss grpc.ServerStream) error {
+			for cursor.segment < len(ssi.s) {
+				group := ssi.s[cursor.segment]
+				if group.domain.isOnMethod(info.FullMethod) && cursor.offset < len(group.ics) {
+					ic := group.ics[cursor.offset]
+					cursor.offset++
+					return ic(srv, ss, info, chainHandler)
+				}
+
+				cursor.offset = 0
+				cursor.segment++
 			}
 
 			return handler(srv, ss)

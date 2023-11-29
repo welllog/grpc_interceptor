@@ -7,83 +7,64 @@ import (
 )
 
 type unaryClientInterceptorGroup struct {
-	handlers []grpc.UnaryClientInterceptor
-	skip     map[string]struct{}
+	ics    []grpc.UnaryClientInterceptor
+	domain domain
 }
 
 type UnaryClientInterceptors struct {
-	global  []*unaryClientInterceptorGroup
-	ggCount int
-	part    map[string][]grpc.UnaryClientInterceptor
+	s []unaryClientInterceptorGroup
 }
 
-func (uci *UnaryClientInterceptors) UseGlobal(interceptors []grpc.UnaryClientInterceptor, skipMethods ...string) {
-	skip := make(map[string]struct{}, len(skipMethods))
-	for _, method := range skipMethods {
-		skip[method] = struct{}{}
-	}
-
-	uci.global = append(uci.global, &unaryClientInterceptorGroup{
-		handlers: interceptors,
-		skip:     skip,
+func (uci *UnaryClientInterceptors) Add(interceptors ...grpc.UnaryClientInterceptor) *UnaryClientInterceptors {
+	uci.s = append(uci.s, unaryClientInterceptorGroup{
+		ics:    interceptors,
+		domain: newDomain(),
 	})
-	uci.ggCount++
+	return uci
 }
 
-func (uci *UnaryClientInterceptors) UseMethod(method string, interceptors ...grpc.UnaryClientInterceptor) {
-	if uci.part == nil {
-		uci.part = make(map[string][]grpc.UnaryClientInterceptor)
-		uci.part[method] = interceptors
-		return
-	}
+func (uci *UnaryClientInterceptors) AddWithoutMethods(methods []string, interceptors ...grpc.UnaryClientInterceptor) *UnaryClientInterceptors {
+	uci.s = append(uci.s, unaryClientInterceptorGroup{
+		ics:    interceptors,
+		domain: newBlackDomain(methods),
+	})
+	return uci
+}
 
-	if _, ok := uci.part[method]; !ok {
-		uci.part[method] = interceptors
-		return
+func (uci *UnaryClientInterceptors) AddOnMethods(methods []string, interceptors ...grpc.UnaryClientInterceptor) *UnaryClientInterceptors {
+	if len(methods) > 0 {
+		uci.s = append(uci.s, unaryClientInterceptorGroup{
+			ics:    interceptors,
+			domain: newWhiteDomain(methods),
+		})
 	}
-
-	uci.part[method] = append(uci.part[method], interceptors...)
+	return uci
 }
 
 func (uci *UnaryClientInterceptors) UnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{},
 		cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 
-		mCount := len(uci.part[method])
-
-		if uci.ggCount+mCount == 0 {
+		if len(uci.s) == 0 {
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 
-		curI := handlerCurI{mCount: mCount}
+		var cursor handleCursor
 		var chainHandler grpc.UnaryInvoker
 
 		chainHandler = func(ctx context.Context, method string, req, reply interface{},
 			cc *grpc.ClientConn, opts ...grpc.CallOption) error {
 
-			if curI.groupI < uci.ggCount {
-				for {
-					group := uci.global[curI.groupI]
-					if _, ok := group.skip[method]; !ok {
-						index := curI.handlerI
-						curI.handlerI++
-						if index < len(group.handlers) {
-							return group.handlers[index](ctx, method, req, reply, cc, chainHandler, opts...)
-						}
-						curI.handlerI = 0
-					}
-					curI.groupI++
-					if curI.groupI >= uci.ggCount {
-						break
-					}
+			for cursor.segment < len(uci.s) {
+				group := uci.s[cursor.segment]
+				if group.domain.isOnMethod(method) && cursor.offset < len(group.ics) {
+					ic := group.ics[cursor.offset]
+					cursor.offset++
+					return ic(ctx, method, req, reply, cc, chainHandler, opts...)
 				}
-			}
 
-			if curI.handlerI < curI.mCount {
-				special := uci.part[method]
-				index := curI.handlerI
-				curI.handlerI++
-				return special[index](ctx, method, req, reply, cc, chainHandler, opts...)
+				cursor.offset = 0
+				cursor.segment++
 			}
 
 			return invoker(ctx, method, req, reply, cc, opts...)

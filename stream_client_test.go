@@ -3,43 +3,44 @@ package grpc_interceptor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
 )
 
 func TestStreamClient(t *testing.T) {
-	streamClientMd := &StreamClientInterceptors{}
+	interceptors := &StreamClientInterceptors{}
+	method := "/xx.TestService/TestStream"
 
-	streamClientMd.UseMethod("/xx.TestService/TestStream", func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, srvMethod string, streamer grpc.Streamer, opts ...grpc.CallOption) (stream grpc.ClientStream, err error) {
-		fmt.Println("part --- 0")
-		stream, err = streamer(ctx, desc, cc, srvMethod, opts...)
-		fmt.Println("part --- 0 --- end")
-		return
-	})
+	interceptors.AddOnMethods([]string{method}, streamClientInterceptorAddOne)
+	interceptors.Add(streamClientInterceptorAddOne)
+	interceptors.AddWithoutMethods([]string{method}, streamClientInterceptorAddOne, streamClientInterceptorAddOne)
+	interceptors.AddWithoutMethods(nil, streamClientInterceptorAddOne)
+	interceptors.AddWithoutMethods([]string{"test"}, streamClientInterceptorAddOne)
 
-	streamClientMd.UseGlobal([]grpc.StreamClientInterceptor{
-		func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, srvMethod string, streamer grpc.Streamer, opts ...grpc.CallOption) (stream grpc.ClientStream, err error) {
-			fmt.Println("global --- 0")
-			stream, err = streamer(ctx, desc, cc, srvMethod)
-			fmt.Println("global --- 0 --- end")
-			return
-		},
-	})
+	handle := interceptors.StreamClientInterceptor()
+	_, _ = handle(context.Background(), &grpc.StreamDesc{}, &grpc.ClientConn{}, method, func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (stream grpc.ClientStream, err error) {
+		id := ctx.Value("id").(int)
+		if id != 3 {
+			t.Fatal("StreamClientInterceptors is not work")
+		}
 
-	streamClientMd.UseGlobal([]grpc.StreamClientInterceptor{
-		func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, srvMethod string, streamer grpc.Streamer, opts ...grpc.CallOption) (stream grpc.ClientStream, err error) {
-			fmt.Println("global --- -1")
-			stream, err = streamer(ctx, desc, cc, srvMethod)
-			fmt.Println("global --- -1 --- end")
-			return
-		},
-	}, "/xx.TestService/TestStream")
-
-	funcs := streamClientMd.StreamClientInterceptor()
-	_, err := funcs(context.Background(), &grpc.StreamDesc{}, &grpc.ClientConn{}, "/xx.TestService/TestStream", func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (stream grpc.ClientStream, err error) {
-		fmt.Println("stream send ...")
 		return nil, nil
 	})
-	fmt.Println(err)
+}
+
+func streamClientInterceptorAddOne(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, srvMethod string, streamer grpc.Streamer, opts ...grpc.CallOption) (stream grpc.ClientStream, err error) {
+	val := ctx.Value("id")
+	var id int
+	if val != nil {
+		id = val.(int) + 1
+	}
+	ctx = context.WithValue(ctx, "id", id)
+
+	fmt.Println(strings.Repeat("-", id), id)
+	stream, err = streamer(ctx, desc, cc, srvMethod, opts...)
+	fmt.Println(strings.Repeat("-", id), id)
+
+	return stream, err
 }

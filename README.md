@@ -30,21 +30,25 @@ handler grpc.StreamHandler) error {
 
 
 // Load interceptor ServerDemo1, ignore on /package.Service/Do1 method
-// Same set of interceptors using a common white list
-unaryMd := &grpc_interceptor.UnaryServerInterceptors{}
-unaryMd.UseGlobal([]grpc.UnaryServerInterceptor{
+// Same set of interceptors using a common black list
+unaryServerIcpts := &grpc_interceptor.UnaryServerInterceptors{}
+unaryServerIcpts.AddWithoutMethods(
+	[]string{"/package.Service/Do1"},
     ServerDemo1,
-    ...
-}, "/package.Service/Do1")
+)
 
 // Load interceptor ServerDemo2, ignore on /package.Service/Do2 method
-streamMd := &grpc_interceptor.StreamServerInterceptors{}
-streamMd.UseGlobal([]grpc.StreamServerInterceptor{ServerDemo2}, "/package.Service/Do2")
+streamServerIcpts := &grpc_interceptor.StreamServerInterceptors{}
+streamServerIcpts.AddWithoutMethods(
+	[]string{"/package.Service/Do2"},
+	ServerDemo2,
+	...
+)
 
 
 s := grpc.NewServer(
-        grpc.StreamInterceptor(streamMd.StreamServerInterceptor()),
-        grpc.UnaryInterceptor(unaryMd.UnaryServerInterceptor()),
+        grpc.StreamInterceptor(streamServerIcpts.StreamServerInterceptor()),
+        grpc.UnaryInterceptor(unaryServerIcpts.UnaryServerInterceptor()),
 )
 ```
 
@@ -71,19 +75,19 @@ streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 ...
 
 
-unaryMd := &grpc_interceptor.UnaryClientInterceptors{}
-unaryMd.UseGlobal([]grpc.UnaryClientInterceptor{
+unaryClientIcpts := &grpc_interceptor.UnaryClientInterceptors{}
+unaryClientIcpts.Add(
     clientDemo1,
     ...
-})
+)
 
 // Load the interceptor clientDemo2 for /package.Service/Do2 methods only
-streamMd := &grpc_interceptor.StreamClientInterceptors{}
-streamMd.UseMethod("/package.Service/Do2", clientDemo2)
+streamClientIcpts := &grpc_interceptor.StreamClientInterceptors{}
+streamClientIcpts.AddOnMethods([]string{"/package.Service/Do2"}, clientDemo2)
 
 grpc.Dial(*address, grpc.WithInsecure(), 
-    grpc.WithUnaryInterceptor(unaryMd.UnaryClientInterceptor()),
-	grpc.WithStreamInterceptor(streamMd.StreamClientInterceptor()),
+    grpc.WithUnaryInterceptor(unaryClientIcpts.UnaryClientInterceptor()), 
+    grpc.WithStreamInterceptor(streamClientIcpts.StreamClientInterceptor()),
 )
 
 ```

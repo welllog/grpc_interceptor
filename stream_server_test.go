@@ -2,7 +2,6 @@ package grpc_interceptor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -11,62 +10,60 @@ import (
 )
 
 func TestStreamServer(t *testing.T) {
-	streamServMd := &StreamServerInterceptors{}
+	interceptors := &StreamServerInterceptors{}
+	method := "/xx.TestService/TestStream"
 
-	streamServMd.UseMethod("/xx.TestService/TestStream", func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		fmt.Println("part --- 0")
-		if val, ok := srv.(string); ok {
-			if val == "service" {
-				return errors.New("srv is string")
-			}
-		}
-		err := handler(srv, ss)
-		fmt.Println("part --- 0 --- end")
+	interceptors.Add(streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("0")
+		err := exec()
+		fmt.Println("0")
 		return err
-	})
+	}))
 
-	streamServMd.UseMethod("/xx.TestService/TestStream", func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		fmt.Println("part --- 1")
-		err := handler(srv, ss)
-		fmt.Println("part --- 1 --- end")
+	interceptors.Add(streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("- 1")
+		err := exec()
+		fmt.Println("- 1")
 		return err
-	}, func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		fmt.Println("part --- 2")
-		err := handler(srv, ss)
-		fmt.Println("part --- 2 --- end")
+	}))
+
+	interceptors.AddOnMethods([]string{method}, streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("-- 2")
+		err := exec()
+		fmt.Println("-- 2")
 		return err
-	})
+	}), streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("--- 3")
+		err := exec()
+		fmt.Println("--- 3")
+		return err
+	}))
 
-	streamServMd.UseGlobal([]grpc.StreamServerInterceptor{
-		func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-			fmt.Println("global --- 0")
-			err := handler(srv, ss)
-			fmt.Println("global --- 0 --- end")
-			return err
-		},
-		func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-			fmt.Println("global --- 1")
-			err := handler(srv, ss)
-			fmt.Println("global --- 1 --- end")
-			return err
-		},
-	})
+	interceptors.AddWithoutMethods([]string{method}, streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("- 1")
+		err := exec()
+		fmt.Println("- 1")
+		return err
+	}))
 
-	streamServMd.UseGlobal([]grpc.StreamServerInterceptor{
-		func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-			fmt.Println("global --- 2")
-			err := handler(srv, ss)
-			fmt.Println("global --- 2 --- end")
-			return err
-		},
-	}, "/xx.TestService/TestStream")
+	interceptors.AddWithoutMethods([]string{"test"}, streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("---- 4")
+		err := exec()
+		fmt.Println("---- 4")
+		return err
+	}))
 
-	funcs := streamServMd.StreamServerInterceptor()
-	err := funcs("service1", &serverStream{}, &grpc.StreamServerInfo{FullMethod: "/xx.TestService/TestStream"}, func(srv interface{}, stream grpc.ServerStream) error {
-		fmt.Println("stream handle ...")
+	interceptors.AddWithoutMethods([]string{"demo"}, streamServerInterceptorFunc(func(exec func() error) error {
+		fmt.Println("----- 5")
+		err := exec()
+		fmt.Println("----- 5")
+		return err
+	}))
+
+	handle := interceptors.StreamServerInterceptor()
+	_ = handle("service1", &serverStream{}, &grpc.StreamServerInfo{FullMethod: method}, func(srv interface{}, stream grpc.ServerStream) error {
 		return nil
 	})
-	fmt.Println(err)
 }
 
 type serverStream struct{}
@@ -92,4 +89,12 @@ func (s *serverStream) SendMsg(m interface{}) error {
 
 func (s *serverStream) RecvMsg(m interface{}) error {
 	return nil
+}
+
+func streamServerInterceptorFunc(fn func(exec func() error) error) func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		return fn(func() error {
+			return handler(srv, ss)
+		})
+	}
 }
